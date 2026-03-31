@@ -3,6 +3,8 @@ pragma solidity ^0.8.18;
 
 import "forge-std/console2.sol";
 import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
+import {ISpoke} from "../interfaces/ISpoke.sol";
+import {IHub} from "../interfaces/IHub.sol";
 
 contract OperationTest is Setup {
 
@@ -244,6 +246,129 @@ contract OperationTest is Setup {
         vm.expectRevert("!management");
         vm.prank(user);
         strategy.claimMerklRewards(users, tokens, amounts, proofs);
+    }
+
+    function test_availableDepositLimit_whenPaused() public {
+        // Mock the Spoke to return paused=true
+        ISpoke.ReserveConfig memory _pausedConfig = ISpoke.ReserveConfig({
+            collateralRisk: 0, paused: true, frozen: false, borrowable: true, receiveSharesEnabled: true
+        });
+        vm.mockCall(
+            address(strategy.SPOKE()),
+            abi.encodeWithSelector(ISpoke.getReserveConfig.selector, strategy.RESERVE_ID()),
+            abi.encode(_pausedConfig)
+        );
+
+        assertEq(strategy.availableDepositLimit(user), 0, "!paused deposit limit");
+    }
+
+    function test_availableDepositLimit_whenFrozen() public {
+        // Mock the Spoke to return frozen=true
+        ISpoke.ReserveConfig memory _frozenConfig = ISpoke.ReserveConfig({
+            collateralRisk: 0, paused: false, frozen: true, borrowable: true, receiveSharesEnabled: true
+        });
+        vm.mockCall(
+            address(strategy.SPOKE()),
+            abi.encodeWithSelector(ISpoke.getReserveConfig.selector, strategy.RESERVE_ID()),
+            abi.encode(_frozenConfig)
+        );
+
+        assertEq(strategy.availableDepositLimit(user), 0, "!frozen deposit limit");
+    }
+
+    function test_availableWithdrawLimit_whenPaused(
+        uint256 _amount
+    ) public {
+        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+
+        // Mock the Spoke to return paused=true
+        ISpoke.ReserveConfig memory _pausedConfig = ISpoke.ReserveConfig({
+            collateralRisk: 0, paused: true, frozen: false, borrowable: true, receiveSharesEnabled: true
+        });
+        vm.mockCall(
+            address(strategy.SPOKE()),
+            abi.encodeWithSelector(ISpoke.getReserveConfig.selector, strategy.RESERVE_ID()),
+            abi.encode(_pausedConfig)
+        );
+
+        assertEq(strategy.availableWithdrawLimit(user), 0, "!paused withdraw limit");
+    }
+
+    function test_availableDepositLimit_atSupplyCap() public {
+        // Mock Hub to return a supply cap that's already reached
+        IHub.SpokeConfig memory _fullConfig = IHub.SpokeConfig({
+            addCap: 100, // 100 whole tokens
+            drawCap: 100,
+            riskPremiumThreshold: 0,
+            active: true,
+            halted: false
+        });
+        vm.mockCall(
+            strategy.HUB(),
+            abi.encodeWithSelector(IHub.getSpokeConfig.selector, strategy.ASSET_ID(), strategy.SPOKE()),
+            abi.encode(_fullConfig)
+        );
+        // Mock current supply to be at the cap
+        vm.mockCall(
+            strategy.HUB(),
+            abi.encodeWithSelector(IHub.getSpokeAddedAssets.selector, strategy.ASSET_ID(), strategy.SPOKE()),
+            abi.encode(uint256(100) * (10 ** decimals))
+        );
+
+        assertEq(strategy.availableDepositLimit(user), 0, "!at cap");
+    }
+
+    function test_availableDepositLimit_belowSupplyCap() public {
+        // Mock Hub to return a supply cap with room remaining
+        IHub.SpokeConfig memory _config = IHub.SpokeConfig({
+            addCap: 1000, // 1000 whole tokens
+            drawCap: 1000,
+            riskPremiumThreshold: 0,
+            active: true,
+            halted: false
+        });
+        vm.mockCall(
+            strategy.HUB(),
+            abi.encodeWithSelector(IHub.getSpokeConfig.selector, strategy.ASSET_ID(), strategy.SPOKE()),
+            abi.encode(_config)
+        );
+        // Mock current supply at 600 whole tokens
+        vm.mockCall(
+            strategy.HUB(),
+            abi.encodeWithSelector(IHub.getSpokeAddedAssets.selector, strategy.ASSET_ID(), strategy.SPOKE()),
+            abi.encode(uint256(600) * (10 ** decimals))
+        );
+
+        uint256 expected = uint256(400) * (10 ** decimals);
+        assertEq(strategy.availableDepositLimit(user), expected, "!remaining cap");
+    }
+
+    function test_availableDepositLimit_noCap() public {
+        // Mock Hub to return MAX_ALLOWED_SPOKE_CAP (no cap)
+        uint40 maxCap = IHub(strategy.HUB()).MAX_ALLOWED_SPOKE_CAP();
+        IHub.SpokeConfig memory _noCap =
+            IHub.SpokeConfig({addCap: maxCap, drawCap: maxCap, riskPremiumThreshold: 0, active: true, halted: false});
+        vm.mockCall(
+            strategy.HUB(),
+            abi.encodeWithSelector(IHub.getSpokeConfig.selector, strategy.ASSET_ID(), strategy.SPOKE()),
+            abi.encode(_noCap)
+        );
+
+        assertEq(strategy.availableDepositLimit(user), type(uint256).max, "!no cap");
+    }
+
+    function test_availableWithdrawLimit_withIdleFunds(
+        uint256 _amount
+    ) public {
+        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+
+        // Airdrop directly to strategy (idle funds, not deployed)
+        airdrop(asset, address(strategy), _amount);
+
+        uint256 withdrawLimit = strategy.availableWithdrawLimit(user);
+        assertGe(withdrawLimit, _amount, "!idle in withdraw limit");
     }
 
 }
