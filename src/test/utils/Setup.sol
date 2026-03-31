@@ -4,7 +4,7 @@ pragma solidity ^0.8.18;
 import "forge-std/console2.sol";
 import {Test} from "forge-std/Test.sol";
 
-import {Strategy, ERC20} from "../../Strategy.sol";
+import {AaveV4LenderStrategy as Strategy, ERC20} from "../../Strategy.sol";
 import {StrategyFactory} from "../../StrategyFactory.sol";
 import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 
@@ -12,14 +12,21 @@ import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
 
 interface IFactory {
+
     function governance() external view returns (address);
 
-    function set_protocol_fee_bps(uint16) external;
+    function set_protocol_fee_bps(
+        uint16
+    ) external;
 
-    function set_protocol_fee_recipient(address) external;
+    function set_protocol_fee_recipient(
+        address
+    ) external;
+
 }
 
 contract Setup is Test, IEvents {
+
     // Contract instances that we will use repeatedly.
     ERC20 public asset;
     IStrategyInterface public strategy;
@@ -38,13 +45,19 @@ contract Setup is Test, IEvents {
     // Address of the real deployed Factory
     address public factory;
 
+    // Aave V4 addresses (Ethereum mainnet)
+    address public constant MAIN_SPOKE = 0x94e7A5dCbE816e498b89aB752661904E2F56c485;
+
+    // Reserve ID for USDC on the Main Spoke (reserveId=7 from the deposit trace)
+    uint256 public constant USDC_RESERVE_ID = 7;
+
     // Integer variables that will be used repeatedly.
     uint256 public decimals;
     uint256 public MAX_BPS = 10_000;
 
-    // Fuzz from $0.01 of 1e6 stable coins up to 1 trillion of a 1e18 coin
-    uint256 public maxFuzzAmount = 1e30;
-    uint256 public minFuzzAmount = 10_000;
+    // Fuzz from $1 of 1e6 stable coins up to 10,000 of a 1e6 coin
+    uint256 public maxFuzzAmount = 10_000 * 1e6;
+    uint256 public minFuzzAmount = 1 * 1e6;
 
     // Default profit max unlock time is set for 10 days
     uint256 public profitMaxUnlockTime = 10 days;
@@ -52,18 +65,16 @@ contract Setup is Test, IEvents {
     function setUp() public virtual {
         _setTokenAddrs();
 
-        // Set asset
-        asset = ERC20(tokenAddrs["DAI"]);
+        uint256 _blockNumber = 24_778_183; // Caching for faster tests
+        vm.selectFork(vm.createFork(vm.envString("ETH_RPC_URL"), _blockNumber));
+
+        // Set asset to USDC
+        asset = ERC20(tokenAddrs["USDC"]);
 
         // Set decimals
         decimals = asset.decimals();
 
-        strategyFactory = new StrategyFactory(
-            management,
-            performanceFeeRecipient,
-            keeper,
-            emergencyAdmin
-        );
+        strategyFactory = new StrategyFactory(management, performanceFeeRecipient, keeper, emergencyAdmin);
 
         // Deploy strategy and set variables
         strategy = IStrategyInterface(setUpStrategy());
@@ -76,18 +87,13 @@ contract Setup is Test, IEvents {
         vm.label(address(asset), "asset");
         vm.label(management, "management");
         vm.label(address(strategy), "strategy");
+        vm.label(MAIN_SPOKE, "spoke");
         vm.label(performanceFeeRecipient, "performanceFeeRecipient");
     }
 
     function setUpStrategy() public returns (address) {
-        // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy = IStrategyInterface(
-            address(
-                strategyFactory.newStrategy(
-                    address(asset),
-                    "Tokenized Strategy"
-                )
-            )
+            address(strategyFactory.newStrategy(address(asset), "Aave V4 USDC Lender", MAIN_SPOKE, USDC_RESERVE_ID))
         );
 
         vm.prank(management);
@@ -125,9 +131,7 @@ contract Setup is Test, IEvents {
         uint256 _totalIdle
     ) public {
         uint256 _assets = _strategy.totalAssets();
-        uint256 _balance = ERC20(_strategy.asset()).balanceOf(
-            address(_strategy)
-        );
+        uint256 _balance = ERC20(_strategy.asset()).balanceOf(address(_strategy));
         uint256 _idle = _balance > _assets ? _assets : _balance;
         uint256 _debt = _assets - _idle;
         assertEq(_assets, _totalAssets, "!totalAssets");
@@ -136,12 +140,19 @@ contract Setup is Test, IEvents {
         assertEq(_totalAssets, _totalDebt + _totalIdle, "!Added");
     }
 
-    function airdrop(ERC20 _asset, address _to, uint256 _amount) public {
+    function airdrop(
+        ERC20 _asset,
+        address _to,
+        uint256 _amount
+    ) public {
         uint256 balanceBefore = _asset.balanceOf(_to);
         deal(address(_asset), _to, balanceBefore + _amount);
     }
 
-    function setFees(uint16 _protocolFee, uint16 _performanceFee) public {
+    function setFees(
+        uint16 _protocolFee,
+        uint16 _performanceFee
+    ) public {
         address gov = IFactory(factory).governance();
 
         // Need to make sure there is a protocol fee recipient to set the fee.
@@ -164,4 +175,5 @@ contract Setup is Test, IEvents {
         tokenAddrs["DAI"] = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
         tokenAddrs["USDC"] = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     }
+
 }

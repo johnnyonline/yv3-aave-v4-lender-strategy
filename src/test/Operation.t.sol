@@ -5,6 +5,7 @@ import "forge-std/console2.sol";
 import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
 
 contract OperationTest is Setup {
+
     function setUp() public virtual override {
         super.setUp();
     }
@@ -16,10 +17,13 @@ contract OperationTest is Setup {
         assertEq(strategy.management(), management);
         assertEq(strategy.performanceFeeRecipient(), performanceFeeRecipient);
         assertEq(strategy.keeper(), keeper);
-        // TODO: add additional check on strat params
+        assertTrue(strategy.SPOKE() != address(0));
+        assertTrue(strategy.HUB() != address(0));
     }
 
-    function test_operation(uint256 _amount) public {
+    function test_operation(
+        uint256 _amount
+    ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
         // Deposit into strategy
@@ -28,7 +32,7 @@ contract OperationTest is Setup {
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        skip(1 days);
+        skip(10 days);
 
         // Report profit
         vm.prank(keeper);
@@ -46,38 +50,28 @@ contract OperationTest is Setup {
         vm.prank(user);
         strategy.redeem(_amount, user, user);
 
-        assertGe(
-            asset.balanceOf(user),
-            balanceBefore + _amount,
-            "!final balance"
-        );
+        assertGe(asset.balanceOf(user), balanceBefore + _amount, "!final balance");
     }
 
     function test_profitableReport(
-        uint256 _amount,
-        uint16 _profitFactor
+        uint256 _amount
     ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
-        _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
 
         // Deposit into strategy
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
-        // Earn Interest
-        skip(1 days);
-
-        // TODO: implement logic to simulate earning interest.
-        uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
-        airdrop(asset, address(strategy), toAirdrop);
+        // Earn Interest - skip enough time for meaningful accrual
+        skip(30 days);
 
         // Report profit
         vm.prank(keeper);
         (uint256 profit, uint256 loss) = strategy.report();
 
-        // Check return Values
-        assertGe(profit, toAirdrop, "!profit");
+        // Should have earned real Aave interest
+        assertGt(profit, 0, "!profit");
         assertEq(loss, 0, "!loss");
 
         skip(strategy.profitMaxUnlockTime());
@@ -88,19 +82,13 @@ contract OperationTest is Setup {
         vm.prank(user);
         strategy.redeem(_amount, user, user);
 
-        assertGe(
-            asset.balanceOf(user),
-            balanceBefore + _amount,
-            "!final balance"
-        );
+        assertGe(asset.balanceOf(user), balanceBefore + _amount, "!final balance");
     }
 
     function test_profitableReport_withFees(
-        uint256 _amount,
-        uint16 _profitFactor
+        uint256 _amount
     ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
-        _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
 
         // Set protocol fee to 0 and perf fee to 10%
         setFees(0, 1_000);
@@ -111,18 +99,14 @@ contract OperationTest is Setup {
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        skip(1 days);
-
-        // TODO: implement logic to simulate earning interest.
-        uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
-        airdrop(asset, address(strategy), toAirdrop);
+        skip(30 days);
 
         // Report profit
         vm.prank(keeper);
         (uint256 profit, uint256 loss) = strategy.report();
 
         // Check return Values
-        assertGe(profit, toAirdrop, "!profit");
+        assertGt(profit, 0, "!profit");
         assertEq(loss, 0, "!loss");
 
         skip(strategy.profitMaxUnlockTime());
@@ -138,62 +122,128 @@ contract OperationTest is Setup {
         vm.prank(user);
         strategy.redeem(_amount, user, user);
 
-        assertGe(
-            asset.balanceOf(user),
-            balanceBefore + _amount,
-            "!final balance"
-        );
+        assertGe(asset.balanceOf(user), balanceBefore + _amount, "!final balance");
 
         vm.prank(performanceFeeRecipient);
-        strategy.redeem(
-            expectedShares,
-            performanceFeeRecipient,
-            performanceFeeRecipient
-        );
+        strategy.redeem(expectedShares, performanceFeeRecipient, performanceFeeRecipient);
 
         checkStrategyTotals(strategy, 0, 0, 0);
 
-        assertGe(
-            asset.balanceOf(performanceFeeRecipient),
-            expectedShares,
-            "!perf fee out"
-        );
+        assertGe(asset.balanceOf(performanceFeeRecipient), expectedShares, "!perf fee out");
     }
 
-    function test_tendTrigger(uint256 _amount) public {
+    function test_tendTrigger(
+        uint256 _amount
+    ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
-        (bool trigger, ) = strategy.tendTrigger();
+        (bool trigger,) = strategy.tendTrigger();
         assertTrue(!trigger);
 
         // Deposit into strategy
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
-        (trigger, ) = strategy.tendTrigger();
+        (trigger,) = strategy.tendTrigger();
         assertTrue(!trigger);
 
         // Skip some time
         skip(1 days);
 
-        (trigger, ) = strategy.tendTrigger();
+        (trigger,) = strategy.tendTrigger();
         assertTrue(!trigger);
 
         vm.prank(keeper);
         strategy.report();
 
-        (trigger, ) = strategy.tendTrigger();
+        (trigger,) = strategy.tendTrigger();
         assertTrue(!trigger);
 
         // Unlock Profits
         skip(strategy.profitMaxUnlockTime());
 
-        (trigger, ) = strategy.tendTrigger();
+        (trigger,) = strategy.tendTrigger();
         assertTrue(!trigger);
 
         vm.prank(user);
         strategy.redeem(_amount, user, user);
 
-        (trigger, ) = strategy.tendTrigger();
+        (trigger,) = strategy.tendTrigger();
         assertTrue(!trigger);
     }
+
+    function test_availableDepositLimit(
+        uint256 _amount
+    ) public {
+        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+
+        // Should have a non-zero deposit limit
+        uint256 depositLimit = strategy.availableDepositLimit(user);
+        assertGt(depositLimit, 0, "!depositLimit");
+
+        // After deposit, limit should decrease
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        uint256 depositLimitAfter = strategy.availableDepositLimit(user);
+        assertLe(depositLimitAfter, depositLimit, "!depositLimit decreased");
+    }
+
+    function test_availableWithdrawLimit(
+        uint256 _amount
+    ) public {
+        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+
+        // Before deposit, withdraw limit should be 0
+        assertEq(strategy.availableWithdrawLimit(user), 0, "!zero before deposit");
+
+        // After deposit, withdraw limit should reflect supplied amount
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        uint256 withdrawLimit = strategy.availableWithdrawLimit(user);
+        assertGt(withdrawLimit, 0, "!withdrawLimit");
+        assertGe(withdrawLimit, _amount - 1, "!withdrawLimit >= amount");
+    }
+
+    function test_setAuction() public {
+        // Non-management cannot set auction
+        vm.expectRevert("!management");
+        vm.prank(user);
+        strategy.setAuction(address(0));
+
+        // Management can set auction to zero
+        vm.prank(management);
+        strategy.setAuction(address(0));
+    }
+
+    function test_setUseAuction() public {
+        // Non-management cannot toggle
+        vm.expectRevert("!management");
+        vm.prank(user);
+        strategy.setUseAuction(true);
+
+        // Management can toggle
+        vm.prank(management);
+        strategy.setUseAuction(true);
+    }
+
+    function test_setMinAmountToSell() public {
+        // Non-management cannot set
+        vm.expectRevert("!management");
+        vm.prank(user);
+        strategy.setMinAmountToSell(1e6);
+
+        // Management can set
+        vm.prank(management);
+        strategy.setMinAmountToSell(1e6);
+    }
+
+    function test_claimMerklRewards_onlyManagement() public {
+        address[] memory users = new address[](0);
+        address[] memory tokens = new address[](0);
+        uint256[] memory amounts = new uint256[](0);
+        bytes32[][] memory proofs = new bytes32[][](0);
+
+        // Non-management cannot claim
+        vm.expectRevert("!management");
+        vm.prank(user);
+        strategy.claimMerklRewards(users, tokens, amounts, proofs);
+    }
+
 }

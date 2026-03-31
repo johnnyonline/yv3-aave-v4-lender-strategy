@@ -1,248 +1,188 @@
 // SPDX-License-Identifier: AGPL-3.0
-pragma solidity ^0.8.18;
+pragma solidity 0.8.23;
 
-import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
+import {AuctionSwapper} from "@periphery/swappers/AuctionSwapper.sol";
+import {BaseHealthCheck, BaseStrategy, ERC20} from "@periphery/Bases/HealthCheck/BaseHealthCheck.sol";
+
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {IHub} from "./interfaces/IHub.sol";
+import {ISpoke} from "./interfaces/ISpoke.sol";
+import {IMerklDistributor} from "./interfaces/IMerklDistributor.sol";
 
-/**
- * The `TokenizedStrategy` variable can be used to retrieve the strategies
- * specific storage data your contract.
- *
- *       i.e. uint256 totalAssets = TokenizedStrategy.totalAssets()
- *
- * This can not be used for write functions. Any TokenizedStrategy
- * variables that need to be updated post deployment will need to
- * come from an external call from the strategies specific `management`.
- */
+contract AaveV4LenderStrategy is AuctionSwapper, BaseHealthCheck {
 
-// NOTE: To implement permissioned functions you can use the onlyManagement, onlyEmergencyAuthorized and onlyKeepers modifiers
-
-contract Strategy is BaseStrategy {
     using SafeERC20 for ERC20;
 
+    // ===============================================================
+    // Constants
+    // ===============================================================
+
+    /// @notice The Aave V4 Spoke contract used for supply/withdraw operations
+    ISpoke public immutable SPOKE;
+
+    /// @notice The Aave V4 Hub contract that manages liquidity and share accounting
+    IHub public immutable HUB;
+
+    /// @notice The reserve identifier on the Spoke for this strategy's asset
+    uint256 public immutable RESERVE_ID;
+
+    /// @notice The asset identifier on the Hub
+    uint16 public immutable ASSET_ID;
+
+    /// @notice The number of decimals of the underlying asset
+    uint256 private immutable _DECIMALS;
+
+    /// @notice The Merkl Distributor contract for claiming rewards
+    IMerklDistributor private constant _MERKL_DISTRIBUTOR =
+        IMerklDistributor(0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae);
+
+    // ===============================================================
+    // Constructor
+    // ===============================================================
+
+    /// @notice Initializes the strategy
+    /// @param _asset The underlying asset to lend
+    /// @param _name The name of the strategy
+    /// @param _spoke The Aave V4 Spoke contract address
+    /// @param _reserveId The reserve ID for `_asset` on the Spoke
     constructor(
         address _asset,
-        string memory _name
-    ) BaseStrategy(_asset, _name) {}
+        string memory _name,
+        address _spoke,
+        uint256 _reserveId
+    ) BaseHealthCheck(_asset, _name) {
+        SPOKE = ISpoke(_spoke);
+        RESERVE_ID = _reserveId;
 
-    /*//////////////////////////////////////////////////////////////
-                NEEDED TO BE OVERRIDDEN BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
+        ISpoke.Reserve memory _reserve = SPOKE.getReserve(RESERVE_ID);
+        require(_reserve.underlying == _asset, "!asset");
 
-    /**
-     * @dev Can deploy up to '_amount' of 'asset' in the yield source.
-     *
-     * This function is called at the end of a {deposit} or {mint}
-     * call. Meaning that unless a whitelist is implemented it will
-     * be entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
-     * @param _amount The amount of 'asset' that the strategy can attempt
-     * to deposit in the yield source.
-     */
-    function _deployFunds(uint256 _amount) internal override {
-        // TODO: implement deposit logic EX:
-        //
-        //      lendingPool.deposit(address(asset), _amount ,0);
+        HUB = _reserve.hub;
+        ASSET_ID = _reserve.assetId;
+        _DECIMALS = asset.decimals();
+
+        asset.forceApprove(_spoke, type(uint256).max);
     }
 
-    /**
-     * @dev Should attempt to free the '_amount' of 'asset'.
-     *
-     * NOTE: The amount of 'asset' that is already loose has already
-     * been accounted for.
-     *
-     * This function is called during {withdraw} and {redeem} calls.
-     * Meaning that unless a whitelist is implemented it will be
-     * entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
-     * Should not rely on asset.balanceOf(address(this)) calls other than
-     * for diff accounting purposes.
-     *
-     * Any difference between `_amount` and what is actually freed will be
-     * counted as a loss and passed on to the withdrawer. This means
-     * care should be taken in times of illiquidity. It may be better to revert
-     * if withdraws are simply illiquid so not to realize incorrect losses.
-     *
-     * @param _amount, The amount of 'asset' to be freed.
-     */
-    function _freeFunds(uint256 _amount) internal override {
-        // TODO: implement withdraw logic EX:
-        //
-        //      lendingPool.withdraw(address(asset), _amount);
+    // ===============================================================
+    // View functions
+    // ===============================================================
+
+    /// @notice Returns the amount of assets currently supplied
+    /// @return The supplied balance including accrued interest
+    function balanceOfSupplied() public view returns (uint256) {
+        return SPOKE.getUserSuppliedAssets(RESERVE_ID, address(this));
     }
 
-    /**
-     * @dev Internal function to harvest all rewards, redeploy any idle
-     * funds and return an accurate accounting of all funds currently
-     * held by the Strategy.
-     *
-     * This should do any needed harvesting, rewards selling, accrual,
-     * redepositing etc. to get the most accurate view of current assets.
-     *
-     * NOTE: All applicable assets including loose assets should be
-     * accounted for in this function.
-     *
-     * Care should be taken when relying on oracles or swap values rather
-     * than actual amounts as all Strategy profit/loss accounting will
-     * be done based on this returned value.
-     *
-     * This can still be called post a shutdown, a strategist can check
-     * `TokenizedStrategy.isShutdown()` to decide if funds should be
-     * redeployed or simply realize any profits/losses.
-     *
-     * @return _totalAssets A trusted and accurate account for the total
-     * amount of 'asset' the strategy currently holds including idle funds.
-     */
-    function _harvestAndReport()
-        internal
-        override
-        returns (uint256 _totalAssets)
-    {
-        // TODO: Implement harvesting logic and accurate accounting EX:
-        //
-        //      if(!TokenizedStrategy.isShutdown()) {
-        //          _claimAndSellRewards();
-        //      }
-        //      _totalAssets = aToken.balanceOf(address(this)) + asset.balanceOf(address(this));
-        //
-        _totalAssets = asset.balanceOf(address(this));
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                    OPTIONAL TO OVERRIDE BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Gets the max amount of `asset` that can be withdrawn.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any withdraw or redeem to enforce
-     * any limits desired by the strategist. This can be used for illiquid
-     * or sandwichable strategies.
-     *
-     *   EX:
-     *       return asset.balanceOf(yieldSource);
-     *
-     * This does not need to take into account the `_owner`'s share balance
-     * or conversion rates from shares to assets.
-     *
-     * @param . The address that is withdrawing from the strategy.
-     * @return . The available amount that can be withdrawn in terms of `asset`
-     */
-    function availableWithdrawLimit(
-        address /*_owner*/
-    ) public view override returns (uint256) {
-        // NOTE: Withdraw limitations such as liquidity constraints should be accounted for HERE
-        //  rather than _freeFunds in order to not count them as losses on withdraws.
-
-        // TODO: If desired implement withdraw limit logic and any needed state variables.
-
-        // EX:
-        // if(yieldSource.notShutdown()) {
-        //    return asset.balanceOf(address(this)) + asset.balanceOf(yieldSource);
-        // }
+    /// @notice Returns the amount of idle assets held by the strategy
+    /// @return The idle asset balance
+    function balanceOfAsset() public view returns (uint256) {
         return asset.balanceOf(address(this));
     }
 
-    /**
-     * @notice Gets the max amount of `asset` that an address can deposit.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any deposit or mints to enforce
-     * any limits desired by the strategist. This can be used for either a
-     * traditional deposit limit or for implementing a whitelist etc.
-     *
-     *   EX:
-     *      if(isAllowed[_owner]) return super.availableDepositLimit(_owner);
-     *
-     * This does not need to take into account any conversion rates
-     * from shares to assets. But should know that any non max uint256
-     * amounts may be converted to shares. So it is recommended to keep
-     * custom amounts low enough as not to cause overflow when multiplied
-     * by `totalSupply`.
-     *
-     * @param . The address that is depositing into the strategy.
-     * @return . The available amount the `_owner` can deposit in terms of `asset`
-     *
+    /// @inheritdoc BaseStrategy
     function availableDepositLimit(
-        address _owner
+        address /*_owner*/
     ) public view override returns (uint256) {
-        TODO: If desired Implement deposit limit logic and any needed state variables .
-        
-        EX:    
-            uint256 totalAssets = TokenizedStrategy.totalAssets();
-            return totalAssets >= depositLimit ? 0 : depositLimit - totalAssets;
-    }
-    */
+        ISpoke.ReserveConfig memory _reserveConfig = SPOKE.getReserveConfig(RESERVE_ID);
+        if (_reserveConfig.paused || _reserveConfig.frozen) return 0;
 
-    /**
-     * @dev Optional function for strategist to override that can
-     *  be called in between reports.
-     *
-     * If '_tend' is used tendTrigger() will also need to be overridden.
-     *
-     * This call can only be called by a permissioned role so may be
-     * through protected relays.
-     *
-     * This can be used to harvest and compound rewards, deposit idle funds,
-     * perform needed position maintenance or anything else that doesn't need
-     * a full report for.
-     *
-     *   EX: A strategy that can not deposit funds without getting
-     *       sandwiched can use the tend when a certain threshold
-     *       of idle to totalAssets has been reached.
-     *
-     * This will have no effect on PPS of the strategy till report() is called.
-     *
-     * @param _totalIdle The current amount of idle funds that are available to deploy.
-     *
-    function _tend(uint256 _totalIdle) internal override {}
-    */
+        IHub.SpokeConfig memory _spokeConfig = HUB.getSpokeConfig(ASSET_ID, address(SPOKE));
 
-    /**
-     * @dev Optional trigger to override if tend() will be used by the strategy.
-     * This must be implemented if the strategy hopes to invoke _tend().
-     *
-     * @return . Should return true if tend() should be called by keeper or false if not.
-     *
-    function _tendTrigger() internal view override returns (bool) {}
-    */
+        // MAX_ALLOWED_SPOKE_CAP means no cap
+        if (_spokeConfig.addCap >= HUB.MAX_ALLOWED_SPOKE_CAP()) return type(uint256).max;
 
-    /**
-     * @dev Optional function for a strategist to override that will
-     * allow management to manually withdraw deployed funds from the
-     * yield source if a strategy is shutdown.
-     *
-     * This should attempt to free `_amount`, noting that `_amount` may
-     * be more than is currently deployed.
-     *
-     * NOTE: This will not realize any profits or losses. A separate
-     * {report} will be needed in order to record any profit/loss. If
-     * a report may need to be called after a shutdown it is important
-     * to check if the strategy is shutdown during {_harvestAndReport}
-     * so that it does not simply re-deploy all funds that had been freed.
-     *
-     * EX:
-     *   if(freeAsset > 0 && !TokenizedStrategy.isShutdown()) {
-     *       depositFunds...
-     *    }
-     *
-     * @param _amount The amount of asset to attempt to free.
-     *
-    function _emergencyWithdraw(uint256 _amount) internal override {
-        TODO: If desired implement simple logic to free deployed funds.
+        // addCap is in whole assets, scale to decimals
+        uint256 _supplyCap = uint256(_spokeConfig.addCap) * (10 ** _DECIMALS);
+        uint256 _currentSupply = HUB.getSpokeAddedAssets(ASSET_ID, address(SPOKE));
 
-        EX:
-            _amount = min(_amount, aToken.balanceOf(address(this)));
-            _freeFunds(_amount);
+        if (_currentSupply >= _supplyCap) return 0;
+
+        return _supplyCap - _currentSupply;
     }
 
-    */
+    /// @inheritdoc BaseStrategy
+    function availableWithdrawLimit(
+        address /*_owner*/
+    ) public view override returns (uint256) {
+        ISpoke.ReserveConfig memory _reserveConfig = SPOKE.getReserveConfig(RESERVE_ID);
+        if (_reserveConfig.paused) return 0;
+
+        return balanceOfAsset() + Math.min(balanceOfSupplied(), HUB.getAssetLiquidity(ASSET_ID));
+    }
+
+    // ===============================================================
+    // Management functions
+    // ===============================================================
+
+    /// @notice Claims rewards from the Merkl distributor
+    /// @param _users Recipients of tokens
+    /// @param _tokens ERC20 tokens being claimed
+    /// @param _amounts Amounts of tokens that will be sent to the corresponding users
+    /// @param _proofs Array of Merkle proofs verifying the claims
+    function claimMerklRewards(
+        address[] calldata _users,
+        address[] calldata _tokens,
+        uint256[] calldata _amounts,
+        bytes32[][] calldata _proofs
+    ) external onlyManagement {
+        _MERKL_DISTRIBUTOR.claim(_users, _tokens, _amounts, _proofs);
+    }
+
+    /// @notice Set the auction contract to use for selling rewards
+    /// @param _auction The auction contract address
+    function setAuction(
+        address _auction
+    ) external onlyManagement {
+        _setAuction(_auction);
+    }
+
+    /// @notice Enable or disable auction usage for reward selling
+    /// @param _useAuction Whether to use auctions
+    function setUseAuction(
+        bool _useAuction
+    ) external onlyManagement {
+        _setUseAuction(_useAuction);
+    }
+
+    /// @notice Set the minimum token amount required to kick an auction
+    /// @param _minAmountToSell Minimum token amount
+    function setMinAmountToSell(
+        uint256 _minAmountToSell
+    ) external onlyManagement {
+        _setMinAmountToSell(_minAmountToSell);
+    }
+
+    // ===============================================================
+    // Internal functions
+    // ===============================================================
+
+    /// @inheritdoc BaseStrategy
+    function _deployFunds(
+        uint256 _amount
+    ) internal override {
+        SPOKE.supply(RESERVE_ID, _amount, address(this));
+    }
+
+    /// @inheritdoc BaseStrategy
+    function _freeFunds(
+        uint256 _amount
+    ) internal override {
+        SPOKE.withdraw(RESERVE_ID, _amount, address(this));
+    }
+
+    /// @inheritdoc BaseStrategy
+    function _emergencyWithdraw(
+        uint256 _amount
+    ) internal override {
+        _freeFunds(_amount);
+    }
+
+    /// @inheritdoc BaseStrategy
+    function _harvestAndReport() internal view override returns (uint256) {
+        return balanceOfSupplied() + balanceOfAsset();
+    }
+
 }
